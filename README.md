@@ -18,13 +18,11 @@ The Collection row is only displayed when the movie belongs to an existing Jelly
 
 - Adds a Collection/Set row to movie DetailsGroupItems
 - Direct navigation from a movie to its Jellyfin Box Set
-- Supports multiple collections if available
 - Configurable label text
 - Optional collection name replacement rules
 - Configurable row positioning
 - Supports positioning relative to native DetailsGroupItems rows
-- Compatible with Jellyfin DetailsGroupItems Extended rows
-- Session-based caching for improved performance
+- Compatible with [Jellyfin DetailsGroupItems Extended](https://github.com/chrissix666/Jellyfin-DetailsGroupItems-Extended) rows
 
 ---
 
