@@ -45,12 +45,14 @@ Examples:
 
 ### Collection Name Replacement Rules
 
-Optional phrase replacement rules can automatically convert localized TMDb naming conventions before display.
+Optional phrase replacement rules can automatically convert localized TMDb Set naming conventions before display.<br>
+(Useful when Sets are scraped in one language but want to be displayed in another.)
 
 Examples:
 
-- Alien Filmreihe → Alien Collection
-- Rocky Filmreihe → Rocky Collection
+- Twilight Saga → Twilight Filmreihe (French common to German common)
+- Alien Filmreihe → Alien Collection (German common to English common)
+- Rocky Colección → Rocky Saga (Spain common to French common)
 
 This only affects the displayed text and does not modify Jellyfin metadata or Box Set names.
 
@@ -69,7 +71,7 @@ Supported native target rows:
 - Writer
 - Studio
 
-When used together with Jellyfin DetailsGroupItems Extended, the Collection row can also be positioned relative to:
+When used together with [Jellyfin DetailsGroupItems Extended](https://github.com/chrissix666/Jellyfin-DetailsGroupItems-Extended), the Collection row can also be positioned relative to:
 
 - Country
 - Awards
