@@ -1,6 +1,6 @@
 Note: This script is compatible with [Jellyfin DetailsGroupItems Extended](https://github.com/chrissix666/Jellyfin-DetailsGroupItems-Extended).
 
-# Jellyfin DetailsGroupItems Collections
+# Jellyfin DetailsGroupItems Sets/Collections
 
 For **Jellyfin Web**, works with **JavaScript Injector**.
 
