@@ -1,0 +1,563 @@
+(function () {
+  "use strict";
+
+  const CONFIG = {
+    labelText: "Collection", // Name the label, for e.g. Set or Collection
+
+    enablePhraseParser: false,
+
+    phraseParser: [
+      { from: "Filmreihe", to: "Collection" } // Convert TMDb set indicator names from their localized language to another term, for e.g., "Saga", "Filmreihe", or "Colección" to "Collection"
+    ],
+
+    position: "top", // "top", "after", or "end"
+
+    afterLabel: "Studio", // Used only if position is "after"
+    // "Genres"
+    // "Director"
+    // "Writer"
+    // "Studio"
+    // "Country"    (DetailsGroupItemsExtended script installed & enabled only)
+    // "Awards"     (DetailsGroupItemsExtended script installed & enabled only)
+    // "Box Office" (DetailsGroupItemsExtended script installed & enabled only)
+
+    debug: false
+  };
+
+  function parseCollectionName(name) {
+    let out = String(name || "");
+
+    if (!CONFIG.enablePhraseParser) {
+      return out.trim();
+    }
+
+    for (const rule of CONFIG.phraseParser || []) {
+      if (!rule || !rule.from) continue;
+      out = out.replaceAll(String(rule.from), String(rule.to || ""));
+    }
+
+    return out.trim();
+  }
+
+  const SETTINGS = {
+    rowKey: "collection",
+    clickable: true,
+    cacheTtlMs: 1000 * 60 * 30,
+    debug: CONFIG.debug
+  };
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function log(...args) {
+    if (SETTINGS.debug) console.log("[CollectionInject]", ...args);
+  }
+
+  function getBaseUrl() {
+    return window.location.origin;
+  }
+
+  function getUrlParams() {
+    const hash = window.location.hash || "";
+    const query = hash.includes("?")
+      ? hash.split("?")[1]
+      : window.location.search.slice(1);
+
+    const params = new URLSearchParams(query);
+
+    return {
+      itemId: params.get("id"),
+      serverId: params.get("serverId")
+    };
+  }
+
+  function getCredentialsServer() {
+    try {
+      const raw = localStorage.getItem("jellyfin_credentials");
+      if (!raw) return null;
+
+      const obj = JSON.parse(raw);
+      return obj?.Servers?.find((s) => s.AccessToken) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function getAccessToken() {
+    return getCredentialsServer()?.AccessToken || null;
+  }
+
+  function getUserId() {
+    try {
+      if (window.ApiClient?.getCurrentUserId) {
+        return window.ApiClient.getCurrentUserId();
+      }
+    } catch {}
+
+    return getCredentialsServer()?.UserId || null;
+  }
+
+  function cacheGet(key) {
+    try {
+      const raw = sessionStorage.getItem(key);
+      if (!raw) return null;
+
+      const obj = JSON.parse(raw);
+      if (Date.now() > obj.expires) return null;
+
+      return obj.value;
+    } catch {
+      return null;
+    }
+  }
+
+  function cacheSet(key, value) {
+    try {
+      sessionStorage.setItem(
+        key,
+        JSON.stringify({
+          value,
+          expires: Date.now() + SETTINGS.cacheTtlMs
+        })
+      );
+    } catch {}
+  }
+
+  async function apiGet(path, params = {}) {
+    const token = getAccessToken();
+    if (!token) {
+      log("No Jellyfin token found");
+      return null;
+    }
+
+    const url = new URL(`${getBaseUrl()}/${path}`);
+
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null && value !== "") {
+        url.searchParams.set(key, value);
+      }
+    }
+
+    const res = await fetch(url.toString(), {
+      headers: { "X-Emby-Token": token }
+    });
+
+    if (!res.ok) {
+      log("API failed:", res.status, url.toString());
+      return null;
+    }
+
+    return res.json();
+  }
+
+  function findDetailsBox() {
+    return document.querySelector(".itemDetailsGroup");
+  }
+
+  function removeRow(box) {
+    if (!box) return;
+
+    const row = box.querySelector(`[data-collection-row="${SETTINGS.rowKey}"]`);
+    if (row) row.remove();
+  }
+
+  function normalizeLabelText(text) {
+    return String(text || "")
+      .replace(/:$/, "")
+      .trim()
+      .toLowerCase();
+  }
+
+  function findRowByLabel(box, labelText) {
+    const wanted = normalizeLabelText(labelText);
+    if (!wanted) return null;
+
+    const labels = box.querySelectorAll(".detailsGroupItem .label, .label");
+
+    for (const label of labels) {
+      if (normalizeLabelText(label.textContent) === wanted) {
+        return label.closest(".detailsGroupItem");
+      }
+    }
+
+    return null;
+  }
+
+  function insertRowByConfiguredPosition(box, row) {
+    const position = String(CONFIG.position || "top").toLowerCase();
+
+    if (position === "top") {
+      box.prepend(row);
+      return;
+    }
+
+    if (position === "end") {
+      box.appendChild(row);
+      return;
+    }
+
+    if (position === "after") {
+      const targetRow = findRowByLabel(box, CONFIG.afterLabel);
+
+      if (targetRow) {
+        targetRow.insertAdjacentElement("afterend", row);
+        return;
+      }
+
+      box.appendChild(row);
+      return;
+    }
+
+    box.prepend(row);
+  }
+
+  async function fetchItem(itemId) {
+    return apiGet(`Items/${encodeURIComponent(itemId)}`);
+  }
+
+  async function fetchUserItems(params = {}) {
+    const userId = getUserId();
+
+    if (userId) {
+      return apiGet(`Users/${encodeURIComponent(userId)}/Items`, params);
+    }
+
+    return apiGet("Items", params);
+  }
+
+  async function buildCollectionIndex() {
+    const cacheKey = "collectioninject_index_v8";
+    const cached = cacheGet(cacheKey);
+    if (cached) return cached;
+
+    const index = {};
+
+    const boxSetsResult = await fetchUserItems({
+      Recursive: "true",
+      IncludeItemTypes: "BoxSet",
+      Fields: "ProviderIds",
+      Limit: "10000"
+    });
+
+    const boxSets = boxSetsResult?.Items || [];
+    log("BoxSets found:", boxSets.length);
+
+    for (const boxSet of boxSets) {
+      const childrenResult = await fetchUserItems({
+        ParentId: boxSet.Id,
+        Recursive: "true",
+        Limit: "10000"
+      });
+
+      const children = childrenResult?.Items || [];
+
+      for (const child of children) {
+        if (!child?.Id) continue;
+
+        if (!index[child.Id]) index[child.Id] = [];
+
+        index[child.Id].push({
+          Id: boxSet.Id,
+          Name: boxSet.Name,
+          Type: boxSet.Type
+        });
+      }
+    }
+
+    if (boxSets.length) cacheSet(cacheKey, index);
+    return index;
+  }
+
+  function applyLinkStyling(a, enabled) {
+    a.style.pointerEvents = enabled ? "auto" : "none";
+    a.style.fontWeight = "600";
+    a.style.color = "inherit";
+    a.style.textDecoration = "none";
+    a.style.cursor = enabled ? "pointer" : "default";
+    a.style.display = "inline";
+    a.style.whiteSpace = "normal";
+    a.style.overflowWrap = "anywhere";
+    a.style.wordBreak = "break-word";
+    a.style.lineHeight = "1.2";
+    a.style.padding = "0";
+    a.style.margin = "0";
+
+    if (!enabled) {
+      a.removeAttribute("href");
+      return;
+    }
+
+    if (!a.dataset.collectionHoverUnderlineBound) {
+      a.addEventListener("mouseenter", () => {
+        a.style.textDecoration = "underline";
+      });
+
+      a.addEventListener("mouseleave", () => {
+        a.style.textDecoration = "none";
+      });
+
+      a.dataset.collectionHoverUnderlineBound = "true";
+    }
+  }
+
+  function createCollectionLink(collection, serverId) {
+    const a = document.createElement("a");
+    a.className = "button-link emby-button";
+    a.textContent = parseCollectionName(collection.Name || "Collection");
+
+    if (SETTINGS.clickable && collection.Id) {
+      const hash =
+        `!/details?id=${encodeURIComponent(collection.Id)}` +
+        (serverId ? `&serverId=${encodeURIComponent(serverId)}` : "");
+
+      a.href = `#${hash}`;
+
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        window.location.hash = hash;
+      });
+    }
+
+    applyLinkStyling(a, SETTINGS.clickable && !!collection.Id);
+    return a;
+  }
+
+  function injectCollectionRow(box, collections, serverId) {
+    removeRow(box);
+
+    if (!collections || !collections.length) {
+      log("Movie is not part of a collection");
+      return;
+    }
+
+    const row = document.createElement("div");
+    row.className = "detailsGroupItem";
+    row.dataset.collectionRow = SETTINGS.rowKey;
+
+    const label = document.createElement("div");
+    label.className = "label";
+    label.textContent = CONFIG.labelText;
+
+    const content = document.createElement("div");
+    content.className = "content focuscontainer-x";
+
+    collections.forEach((collection, index) => {
+      if (index > 0) content.appendChild(document.createTextNode(", "));
+      content.appendChild(createCollectionLink(collection, serverId));
+    });
+
+    row.appendChild(label);
+    row.appendChild(content);
+
+    insertRowByConfiguredPosition(box, row);
+
+    log("Injected collection:", collections);
+  }
+
+  const STATE = {
+    currentItemId: null,
+    currentServerId: null,
+    currentItem: null,
+    currentCollections: null,
+    currentCollectionsText: "",
+    itemPromises: new Map(),
+    indexPromise: null,
+    runToken: 0,
+    lastScanAt: 0
+  };
+
+  function isVisible(el) {
+    if (!el || !el.isConnected) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function findDetailsBoxes() {
+    return Array.from(document.querySelectorAll(".itemDetailsGroup"))
+      .filter(isVisible);
+  }
+
+  function findBestDetailsBox() {
+    const boxes = findDetailsBoxes();
+    if (!boxes.length) return null;
+    return boxes[boxes.length - 1];
+  }
+
+  function hasCorrectCollectionRow(box) {
+    const row = box?.querySelector(`[data-collection-row="${SETTINGS.rowKey}"]`);
+    if (!row) return false;
+    return row.dataset.collectionForItemId === String(STATE.currentItemId || "") &&
+      row.dataset.collectionNames === String(STATE.currentCollectionsText || "");
+  }
+
+  function markCollectionRow(box) {
+    const row = box?.querySelector(`[data-collection-row="${SETTINGS.rowKey}"]`);
+    if (!row) return;
+    row.dataset.collectionForItemId = String(STATE.currentItemId || "");
+    row.dataset.collectionNames = String(STATE.currentCollectionsText || "");
+  }
+
+  function needsInjection(box) {
+    if (!box) return false;
+    if (!STATE.currentItemId) return false;
+    if (!STATE.currentCollections || !STATE.currentCollections.length) return false;
+    return !hasCorrectCollectionRow(box);
+  }
+
+  async function fetchItemCached(itemId) {
+    if (!itemId) return null;
+
+    const key = String(itemId);
+    if (STATE.currentItemId === key && STATE.currentItem) return STATE.currentItem;
+    if (STATE.itemPromises.has(key)) return STATE.itemPromises.get(key);
+
+    const promise = fetchItem(key).finally(() => STATE.itemPromises.delete(key));
+    STATE.itemPromises.set(key, promise);
+    return promise;
+  }
+
+  async function getCollectionIndexStable() {
+    if (!STATE.indexPromise) {
+      STATE.indexPromise = buildCollectionIndex().catch((err) => {
+        STATE.indexPromise = null;
+        throw err;
+      });
+    }
+    return STATE.indexPromise;
+  }
+
+  async function prepareStateForCurrentRoute() {
+    const { itemId, serverId } = getUrlParams();
+
+    if (!itemId) {
+      STATE.currentItemId = null;
+      STATE.currentServerId = null;
+      STATE.currentItem = null;
+      STATE.currentCollections = null;
+      STATE.currentCollectionsText = "";
+      return false;
+    }
+
+    if (STATE.currentItemId !== itemId) {
+      STATE.currentItemId = itemId;
+      STATE.currentServerId = serverId;
+      STATE.currentItem = null;
+      STATE.currentCollections = null;
+      STATE.currentCollectionsText = "";
+    } else {
+      STATE.currentServerId = serverId;
+    }
+
+    const item = await fetchItemCached(itemId);
+    if (STATE.currentItemId !== itemId) return false;
+
+    STATE.currentItem = item;
+    log("Current item:", item?.Name, item?.Type);
+
+    if (!item || item.Type !== "Movie") {
+      for (const box of findDetailsBoxes()) removeRow(box);
+      STATE.currentCollections = [];
+      STATE.currentCollectionsText = "";
+      return false;
+    }
+
+    const index = await getCollectionIndexStable();
+    if (STATE.currentItemId !== itemId) return false;
+
+    STATE.currentCollections = index[itemId] || [];
+    STATE.currentCollectionsText = STATE.currentCollections
+      .map((c) => `${c.Id || ""}:${c.Name || ""}`)
+      .join("|");
+
+    return true;
+  }
+
+  function applyCurrentCollectionsToDom() {
+    const box = findBestDetailsBox();
+    if (!box) return false;
+
+    if (!STATE.currentItem || STATE.currentItem.Type !== "Movie") {
+      removeRow(box);
+      return false;
+    }
+
+    if (!STATE.currentCollections || !STATE.currentCollections.length) {
+      removeRow(box);
+      return false;
+    }
+
+    if (!needsInjection(box)) return true;
+
+    injectCollectionRow(box, STATE.currentCollections, STATE.currentServerId);
+    markCollectionRow(box);
+    return true;
+  }
+
+  async function scanAndReconcile() {
+    const token = ++STATE.runToken;
+
+    const ready = await prepareStateForCurrentRoute();
+    if (token !== STATE.runToken) return;
+    if (!ready) return;
+
+    applyCurrentCollectionsToDom();
+  }
+
+  function scheduleScan(delay = 100) {
+    clearTimeout(scheduleScan._t);
+    scheduleScan._t = setTimeout(scanAndReconcile, delay);
+  }
+
+  function bootScanBurst() {
+    scheduleScan(50);
+    setTimeout(scanAndReconcile, 250);
+    setTimeout(scanAndReconcile, 700);
+    setTimeout(scanAndReconcile, 1500);
+    setTimeout(scanAndReconcile, 3000);
+  }
+
+  let lastRouteKey = "";
+
+  function getRouteKey() {
+    const { itemId, serverId } = getUrlParams();
+    return `${itemId || ""}:${serverId || ""}`;
+  }
+
+  new MutationObserver(() => {
+    const routeKey = getRouteKey();
+
+    if (routeKey !== lastRouteKey) {
+      lastRouteKey = routeKey;
+      bootScanBurst();
+      return;
+    }
+
+    const now = Date.now();
+    if (now - STATE.lastScanAt > 250) {
+      STATE.lastScanAt = now;
+      scheduleScan(150);
+    }
+  }).observe(document.body, {
+    childList: true,
+    subtree: true
+  });
+
+  setInterval(() => {
+    const routeKey = getRouteKey();
+
+    if (routeKey !== lastRouteKey) {
+      lastRouteKey = routeKey;
+      bootScanBurst();
+      return;
+    }
+
+    if (!applyCurrentCollectionsToDom()) {
+      scanAndReconcile();
+    }
+  }, 750);
+
+  window.addEventListener("hashchange", bootScanBurst);
+  window.addEventListener("popstate", bootScanBurst);
+
+  lastRouteKey = getRouteKey();
+  bootScanBurst();
+})();
