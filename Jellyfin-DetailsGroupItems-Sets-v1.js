@@ -137,8 +137,10 @@
       }
     }
 
+    // Authorization header: Jellyfin 12.x ignores X-Emby-Token unless legacy
+    // authorization is switched on; this form works in 10.10.x and 12.x.
     const res = await fetch(url.toString(), {
-      headers: { "X-Emby-Token": token }
+      headers: { Authorization: `MediaBrowser Token="${token}"` }
     });
 
     if (!res.ok) {
@@ -305,8 +307,10 @@
     a.textContent = parseCollectionName(collection.Name || "Collection");
 
     if (SETTINGS.clickable && collection.Id) {
+      // '#/details' directly: the '#!' form only reached it through a
+      // redirect that 12.x marks as deprecated.
       const hash =
-        `!/details?id=${encodeURIComponent(collection.Id)}` +
+        `/details?id=${encodeURIComponent(collection.Id)}` +
         (serverId ? `&serverId=${encodeURIComponent(serverId)}` : "");
 
       a.href = `#${hash}`;
@@ -319,6 +323,17 @@
 
     applyLinkStyling(a, SETTINGS.clickable && !!collection.Id);
     return a;
+  }
+
+  // Line height of Jellyfin's own row labels in this box: a plain div in
+  // 10.10.x (same value as ours, so nothing changes there), an MUI
+  // Typography <p> with a taller line in 12.x; without it our rows would sit
+  // 2px lower than the native ones.
+  function matchNativeLabel(box, label) {
+    const native = box && box.querySelector(
+      ".detailsGroupItem:not([data-omdb-row]):not([data-collection-row]) .label"
+    );
+    if (native) label.style.lineHeight = getComputedStyle(native).lineHeight;
   }
 
   function injectCollectionRow(box, collections, serverId) {
@@ -336,6 +351,7 @@
     const label = document.createElement("div");
     label.className = "label";
     label.textContent = CONFIG.labelText;
+    matchNativeLabel(box, label);
 
     const content = document.createElement("div");
     content.className = "content focuscontainer-x";
